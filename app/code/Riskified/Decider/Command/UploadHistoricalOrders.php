@@ -1,95 +1,179 @@
 <?php
+
 namespace Riskified\Decider\Command;
 
+use Magento\Framework\Api\SearchCriteria;
+use Magento\Framework\Api\SearchCriteriaBuilder;
+use Magento\Framework\App\Area;
+use Magento\Framework\App\Config\ScopeConfigInterface;
+use Magento\Framework\App\ObjectManager;
+use Magento\Framework\App\State;
+use Magento\Sales\Api\Data\OrderInterface;
+use Magento\Sales\Api\Data\OrderSearchResultInterface;
+use Magento\Sales\Api\OrderRepositoryInterface;
+use Magento\Store\Model\ScopeInterface;
+use Riskified\Decider\Api\Order\Helper;
+use Riskified\Decider\Validator\CompositeValidator;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Input\InputArgument;
 use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Output\OutputInterface;
-
 use Riskified\Common\Riskified;
-use Riskified\Common\Env;
 use Riskified\Common\Validations;
 use Riskified\Common\Signature;
 use Riskified\OrderWebhook\Model;
-use Riskified\OrderWebhook\Transport;
 use Riskified\OrderWebhook\Transport\CurlTransport;
 
 class UploadHistoricalOrders extends Command
 {
-    protected $_scopeConfig;
-    protected $_orderRepository;
-    protected $_searchCriteriaBuilder;
-    protected $_orderHelper;
-    protected $_transport;
-    protected $_totalUploaded = 0;
-    protected $_currentPage = 1;
-    protected $_orders;
-
     const BATCH_SIZE = 10;
+    const RISKIFIED_AUTH_KEY_CONFIG_PATH = 'riskified/riskified/key';
+    const RISKIFIED_ENV_CONFIG_PATH = 'riskified/riskified/env';
+    const RISKIFIED_DOMAIN_CONFIG_PATH = 'riskified/riskified/domain';
+    const RISKIFIED_ENABLED_CONFIG_PATH = 'riskified/riskified_general/enabled';
 
+    /**
+     * @var int
+     */
+    private $totalUploaded = 0;
+
+    /**
+     * @var int
+     */
+    private $currentPage = 1;
+
+    /**
+     * @var CurlTransport
+     */
+    private $transport;
+
+    /**
+     * @var State
+     */
+    private $state;
+
+    /**
+     * @var Helper
+     */
+    private $orderHelper;
+
+    /**
+     * @var ScopeConfigInterface
+     */
+    private $scopeConfig;
+
+    /**
+     * @var OrderRepositoryInterface
+     */
+    private $orderRepository;
+
+    /**
+     * @var SearchCriteriaBuilder
+     */
+    private $searchCriteriaBuilder;
+
+    /**
+     * @var OrderInterface[]
+     */
+    private $orders;
+
+    /**
+     * @var SearchCriteria
+     */
+    private $searchCriteria;
+
+    /**
+     * @var CompositeValidator
+     */
+    private $compositeValidator;
+
+    /**
+     * @param State $state
+     * @param ScopeConfigInterface $scopeConfig
+     * @param OrderRepositoryInterface $orderRepository
+     * @param SearchCriteriaBuilder $searchCriteriaBuilder
+     * @param CompositeValidator $compositeValidator
+     * @param string|null $name
+     */
     public function __construct(
-        \Magento\Framework\App\State $state,
-        \Magento\Store\Model\StoreManagerInterface $storeManagerInterface,
-        \Magento\Framework\App\Config\ScopeConfigInterface $scopeConfig,
-        \Magento\Sales\Api\OrderRepositoryInterface $orderRepository,
-        \Magento\Framework\Api\SearchCriteria $searchCriteriaBuilder
+        State $state,
+        ScopeConfigInterface $scopeConfig,
+        OrderRepositoryInterface $orderRepository,
+        SearchCriteriaBuilder $searchCriteriaBuilder,
+        CompositeValidator $compositeValidator,
+        $name = null
     ) {
-        $state->setAreaCode('adminhtml');
+        $this->state = $state;
+        $this->scopeConfig = $scopeConfig;
+        $this->orderRepository = $orderRepository;
+        $this->searchCriteriaBuilder = $searchCriteriaBuilder;
+        $this->transport = new CurlTransport(new Signature\HttpDataSignature());
+        $this->transport->timeout = 15;
+        $this->compositeValidator = $compositeValidator;
 
-        $this->_scopeConfig             = $scopeConfig;
-        $this->_orderRepository         = $orderRepository;
-        $this->_searchCriteriaBuilder   = $searchCriteriaBuilder;
-
-        $objectManager = \Magento\Framework\App\ObjectManager::getInstance();
-        $this->_orderHelper = $objectManager->get('\Riskified\Decider\Api\Order\Helper');
-
-        $this->_transport = new CurlTransport(new Signature\HttpDataSignature());
-        $this->_transport->timeout = 15;
-
-        parent::__construct();
+        parent::__construct($name);
     }
 
     /**
-     * @inheritdoc
+     * {@inheritdoc}
      */
     protected function configure()
     {
         $this->setName('riskified:sync:historical-orders');
-        $this->setDescription('Send your historical orders to riskified backed');
+        $this->setDescription('Send your historical orders to riskified backed with specify date range');
+        $this->addArgument('from', InputArgument::OPTIONAL, 'Start Date in format "Y-m-d"');
+        $this->addArgument('to', InputArgument::OPTIONAL, 'End Date in format "Y-m-d"');
 
         parent::configure();
     }
 
     /**
-     * @inheritdoc
+     * {@inheritdoc}
      */
     protected function execute(InputInterface $input, OutputInterface $output)
     {
+        $this->state->setAreaCode(Area::AREA_ADMINHTML);
+        $objectManager = ObjectManager::getInstance();
+        $this->orderHelper = $objectManager->get(Helper::class);
 
-        $authToken = $this->_scopeConfig->getValue('riskified/riskified/key', \Magento\Store\Model\ScopeInterface::SCOPE_STORE);
-        $env = constant('\Riskified\Common\Env::' . $this->_scopeConfig->getValue('riskified/riskified/env'));
-        $domain = $this->_scopeConfig->getValue('riskified/riskified/domain');
+        $authToken = $this->scopeConfig->getValue(static::RISKIFIED_AUTH_KEY_CONFIG_PATH, ScopeInterface::SCOPE_STORE);
+        $env = constant('\Riskified\Common\Env::' . $this->scopeConfig->getValue(static::RISKIFIED_ENV_CONFIG_PATH));
+        $domain = $this->scopeConfig->getValue(static::RISKIFIED_DOMAIN_CONFIG_PATH);
 
         $output->writeln("Riskified auth token: $authToken \n");
         $output->writeln("Riskified shop domain: $domain \n");
         $output->writeln("Riskified target environment: $env \n");
         $output->writeln("*********** \n");
 
+//        Riskified::init($domain, $authToken, $env, Validations::SKIP);
+exit;
+        $from = $input->getArgument('from');
+        $to = $input->getArgument('to');
 
-        Riskified::init($domain, $authToken, $env, Validations::SKIP);
+        if (isset($from) || isset($to)) {
+            $this->compositeValidator->validate([
+                'from' => $from,
+                'to' => $to
+            ]);
+exit;
+            $this->setSearchCriteria($from, $to);
+        } else {
+            $this->searchCriteria = $this->searchCriteriaBuilder->create();
+        }
+
 
         $fullOrderRepository = $this->getEntireCollection();
         $total_count = $fullOrderRepository->getSize();
 
         $output->writeln("Starting to upload orders, total_count: $total_count \n");
         $this->getCollection();
-        while ($this->_totalUploaded < $total_count) {
+        while ($this->totalUploaded < $total_count) {
             try {
                 $this->postOrders();
-                $this->_totalUploaded += count($this->_orders);
-                $this->_currentPage++;
+                $this->totalUploaded += count($this->orders);
+                $this->currentPage++;
                 $output->writeln("Uploaded " .
-                    $this->_totalUploaded .
+                    $this->totalUploaded .
                     " of " .
                     $total_count
                     ." orders\n");
@@ -105,90 +189,110 @@ class UploadHistoricalOrders extends Command
     /**
      * Retrieve prepared order collection for counting values
      *
-     * @return \Magento\Sales\Api\Data\OrderSearchResultInterface
+     * @return OrderSearchResultInterface
      */
-    protected function getEntireCollection() {
+    private function getEntireCollection(): OrderSearchResultInterface
+    {
         $orderResult = $this
-            ->_orderRepository
-            ->getList($this->_searchCriteriaBuilder);
+            ->orderRepository
+            ->getList($this->searchCriteria);
+
         return $orderResult;
     }
 
     /**
      * Retrieve paginated collection
-     *
-     * @return void
      */
-    protected function getCollection() {
-        $this->_searchCriteriaBuilder
+    private function getCollection()
+    {
+        $searchCriteria = $this->searchCriteria
             ->setPageSize(self::BATCH_SIZE)
-            ->setCurrentPage($this->_currentPage);
-        $orderResult = $this->_orderRepository->getList($this->_searchCriteriaBuilder);
-        $this->_orders = $orderResult->getItems();
+            ->setCurrentPage($this->currentPage);
+
+        $orderResult = $this->orderRepository->getList($searchCriteria);
+        $this->orders = $orderResult->getItems();
     }
 
     /**
      * Sends orders to endpoint
      *
-     * @return void
+     * @throws \Exception
      */
-    protected function postOrders() {
-        if (!$this->_scopeConfig->getValue('riskified/riskified_general/enabled')) {
+    private function postOrders()
+    {
+        if (!$this->scopeConfig->getValue(static::RISKIFIED_ENABLED_CONFIG_PATH)) {
             return;
         }
-        $orders = array();
+        $orders = [];
 
-        foreach ($this->_orders as $model) {
+        foreach ($this->orders as $model) {
             $orders[] = $this->prepareOrder($model);
         }
-        $this->_transport->sendHistoricalOrders($orders);
+        $this->transport->sendHistoricalOrders($orders);
     }
 
     /**
-     * @param Model\Order $model
+     * @param $model
      *
      * @return Model\Order
+     * @throws \Exception
      */
-    protected function prepareOrder($model) {
+    private function prepareOrder($model)
+    {
         $gateway = 'unavailable';
         if ($model->getPayment()) {
             $gateway = $model->getPayment()->getMethod();
         }
 
-        $this->_orderHelper->setOrder($model);
+        $this->orderHelper->setOrder($model);
 
-        $order_array = array(
-            'id' => $this->_orderHelper->getOrderOrigId(),
+        $order_array = [
+            'id' => $this->orderHelper->getOrderOrigId(),
             'name' => $model->getIncrementId(),
             'email' => $model->getCustomerEmail(),
-            'created_at' => $this->_orderHelper->formatDateAsIso8601($model->getCreatedAt()),
+            'created_at' => $this->orderHelper->formatDateAsIso8601($model->getCreatedAt()),
             'currency' => $model->getOrderCurrencyCode(),
-            'updated_at' => $this->_orderHelper->formatDateAsIso8601($model->getUpdatedAt()),
+            'updated_at' => $this->orderHelper->formatDateAsIso8601($model->getUpdatedAt()),
             'gateway' => $gateway,
-            'browser_ip' => $this->_orderHelper->getRemoteIp(),
+            'browser_ip' => $this->orderHelper->getRemoteIp(),
             'note' => $model->getCustomerNote(),
             'total_price' => $model->getGrandTotal(),
             'total_discounts' => $model->getDiscountAmount(),
             'subtotal_price' => $model->getBaseSubtotalInclTax(),
-            'discount_codes' => $this->_orderHelper->getDiscountCodes($model),
+            'discount_codes' => $this->orderHelper->getDiscountCodes($model),
             'taxes_included' => true,
             'total_tax' => $model->getBaseTaxAmount(),
             'total_weight' => $model->getWeight(),
-            'cancelled_at' => $this->_orderHelper->formatDateAsIso8601($this->_orderHelper->getCancelledAt()),
+            'cancelled_at' => $this->orderHelper->formatDateAsIso8601($this->orderHelper->getCancelledAt()),
             'financial_status' => $model->getState(),
             'fulfillment_status' => $model->getStatus(),
             'vendor_id' => $model->getStoreId(),
-            'vendor_name' => $model->getStoreName(),
-        );
+            'vendor_name' => $model->getStoreName()
+        ];
 
         $order = new Model\Order(array_filter($order_array, 'strlen'));
-        $order->customer = $this->_orderHelper->getCustomer();
-        $order->shipping_address = $this->_orderHelper->getShippingAddress();
-        $order->billing_address = $this->_orderHelper->getBillingAddress();
-        $order->payment_details = $this->_orderHelper->getPaymentDetails();
-        $order->line_items = $this->_orderHelper->getLineItems();
-        $order->shipping_lines = $this->_orderHelper->getShippingLines();
+        $order->customer = $this->orderHelper->getCustomer();
+        $order->shipping_address = $this->orderHelper->getShippingAddress();
+        $order->billing_address = $this->orderHelper->getBillingAddress();
+        $order->payment_details = $this->orderHelper->getPaymentDetails();
+        $order->line_items = $this->orderHelper->getLineItems();
+        $order->shipping_lines = $this->orderHelper->getShippingLines();
 
         return $order;
+    }
+
+    /**
+     * @param string $from
+     * @param string $to
+     */
+    private function setSearchCriteria(string $from, string $to)
+    {
+        $from = date('Y-m-d 00:00:00', strtotime($from));
+        $to = date('Y-m-d 23:59:59', strtotime($to));
+
+        $this->searchCriteria = $this->searchCriteriaBuilder
+            ->addFilter('created_at', $from, 'gt')
+            ->addFilter('created_at', $to, 'lt')
+            ->create();
     }
 }

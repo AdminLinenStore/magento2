@@ -33,4 +33,12 @@
             </argument>
         </arguments>
     </type>
+    <type name="Riskified\Decider\Validator\CompositeValidator">
+        <arguments>
+            <argument name="validators" xsi:type="array">
+                <item name="format" xsi:type="object">Riskified\Decider\Validator\FormatValidator</item>
+                <item name="range" xsi:type="object">Riskified\Decider\Validator\RangeValidator</item>
+            </argument>
+        </arguments>
+    </type>
 </config>
