@@ -145,8 +145,8 @@ class UploadHistoricalOrders extends Command
         $output->writeln("Riskified target environment: $env \n");
         $output->writeln("*********** \n");
 
-//        Riskified::init($domain, $authToken, $env, Validations::SKIP);
-exit;
+        Riskified::init($domain, $authToken, $env, Validations::SKIP);
+
         $from = $input->getArgument('from');
         $to = $input->getArgument('to');
 
@@ -155,7 +155,7 @@ exit;
                 'from' => $from,
                 'to' => $to
             ]);
-exit;
+
             $this->setSearchCriteria($from, $to);
         } else {
             $this->searchCriteria = $this->searchCriteriaBuilder->create();
